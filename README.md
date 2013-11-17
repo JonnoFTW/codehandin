@@ -33,7 +33,7 @@ The following languages are supported and use the following runtimes:
 * Matlab
 * GNU Octave
 
-For more information see JonnoFTW/codehandin/blob/master/local/codehandinws/externallib.php#L177
+For more information see [externallib.php](blob/master/local/codehandinws/externallib.php#L177)
 
 Usage
 -----
