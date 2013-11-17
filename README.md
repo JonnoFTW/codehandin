@@ -14,11 +14,11 @@ Clone this project to your moodle root directory and login to Moodle as Administ
 * Under Site administration -> plugins -> Web Services -> Overview, follow steps 1, 2 (ensuring XML-RPC is enabled), 5 (ensuring the codehandin webservice is enabled), 8 (ensuring all users that need to use the codehandin services have a token).
 * If it hasn't been fixed as of writing, there is a bug in the Moodle administration interface that prevents you from giving a webservice a shortname (which is required to use any webservice). You can fix this by adding the following lines into the file `admin/webservice/forms.php` at line 69:
 
-`
+```php
     $mform->addElement('text', 'shortname', get_string('shortname'));
     $mform->addRule('shortname', get_string('required'), 'required', null, 'client');
     $mform->setType('shortname', PARAM_TEXT);
-`
+```
 
 Supported Languages
 -------------------
@@ -33,7 +33,7 @@ The following languages are supported and use the following runtimes:
 * Matlab
 * GNU Octave
 
-For more information see
+For more information see JonnoFTW/codehandin/blob/master/local/codehandinws/externallib.php#L177
 
 Usage
 -----
