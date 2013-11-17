@@ -1,0 +1,645 @@
+<?php
+
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
+
+/**
+ * Codehandin external webservice
+ * Used to submit and test code from an uploaded file
+ * May well be contain race conditions
+ * Still needs to handle zip files
+ *
+ * @package    localcodehandinws
+ * @copyright  2011 Moodle Pty Ltd (http://moodle.com)
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+require_once($CFG->libdir . "/externallib.php");
+require_once($CFG->dirroot . "/lib/enrollib.php");
+function isAssign($obj) {
+    return $obj->modulename === "assign";
+}
+function removeDir($dir) {
+    $structure = glob(rtrim($dir, "/").'/*');
+    if (is_array($structure)) {
+        foreach($structure as $file) {
+            if (is_dir($file)) recursiveRemove($file);
+            elseif (is_file($file)) unlink($file);
+        }
+    }
+    rmdir($dir);
+}
+// Clear out the user's temp dir
+function cleanup($id) {
+    global $CFG;
+    $dir = "{$CFG->dataroot}/temp/$id/";
+    removeDir($dir);
+}
+class local_codehandinws_external extends external_api {
+
+    /**
+     * Returns description of method parameters
+     * @return external_function_parameters
+     */
+    public static function fetch_assignments_parameters() {
+        return new external_function_parameters(
+                array()
+        );
+    }
+
+    
+    /**
+     * Returns welcome message
+     * @return string welcome message
+     */
+    public static function fetch_assignments() {
+        global $USER, $DB;
+
+        //Parameter validation
+        //REQUIRED
+        $params = self::validate_parameters(self::fetch_assignments_parameters(),
+                array());
+
+        //Context validation
+        //OPTIONAL but in most web service it should present
+        $context = get_context_instance(CONTEXT_MODULE, $USER->id);
+        self::validate_context($context);
+
+        //Capability checking
+        //OPTIONAL but in most web service it should present
+        if (!has_capability('mod/codehandin:view', $context)) {
+            return json_encode(['error'=>"You do not have permissions to view this as {$USER->firstname} {$USER->lastname}"]);
+        }
+
+     // Select those instances of codehandin for topics that the user is enrolled in
+     // This should probably be in one query.
+        $courses = "(".implode(",",array_keys(enrol_get_my_courses())).")";
+        $sql = "
+    SELECT *  
+      FROM {codehandin}
+     WHERE {codehandin}.course IN {$courses}";
+        $events = $DB->get_records_sql($sql);
+        foreach($events as &$v) {
+            $v->checkpoints = $DB->get_records_sql("SELECT * FROM {codehandin_checkpoint} WHERE {codehandin_checkpoint}.assign_id = ?",[$v->id]);
+        }
+       return json_encode($events);
+    }
+
+    /**
+     * Returns description of method result value
+     * @return external_description
+     */
+    public static function fetch_assignments_returns() {
+        return new external_value(PARAM_RAW, 'The user\'s programming assignments');
+    }
+
+    
+    
+    /**
+     * Returns description of method parameters
+     * @return external_function_parameters
+     */
+    public static function test_assignment_parameters() {
+        return new external_function_parameters(
+                array('aid'      => new external_value(PARAM_INT, 'Assignment identifier'),
+                      'file_id' => new external_value(PARAM_INT, 'ID of the file we want to test'),
+                      'continue' => new external_value(PARAM_BOOL, 'Continue if a test fails')//,VALUE_DEFAULT,false,false)
+                )
+        );
+    }
+    /**
+     * Returns the file object, false if it doesn't exist
+     */
+    private static function getFile($id) {
+        global $USER;
+        $fs = get_file_storage();
+        $context = context_user::instance($USER->id);
+        $file =  $fs->get_file_by_id($id);
+        // make sure they actually created this file
+        if(!$file || $file->get_userid() !== $USER->id)
+            return false;
+        return $file;
+    }
+    /**
+      * Prepare outputs by replacing newlines with \n. Also trims whitespace from lines
+      */
+    private static function prepareOutput($output) {
+        return trim(implode("\n",array_map('trim',preg_split ('/$\R?^/m',$output))));
+    }
+    /**
+      * Return the string used to run the compiler
+      * Ideally, $lang should be an ID to a table in the database
+      * and a small templateing engine used with the following substitutions
+      * 
+      * %t => $userTempDir (with no trailing slash)
+      * %e => $ext
+      *
+      * A null field for cmdCompile should return empty string
+      */
+    private static function cmdCompile($lang,$userTempDir) {
+        $ext = "";
+        if(strtoupper(substr(PHP_OS, 0, 3)) === "WIN") {
+            $ext = ".exe";
+        }
+        switch($lang) {
+            case "java":
+                return "javac {$userTempDir}/*.java -d {$userTempDir}";
+            case "c++": // Should probably detect other extensions like cxx or C++
+                return "g++ -std=c++11 -O2  {$userTempDir}*.cpp -o {$userTempDir}main{$ext}";
+            case "c":
+                return "gcc -std=c99 -O2  {$userTempDir}*.c -o {$userTempDir}main{$ext}";
+            case "matlab":
+            case "octave":
+            case "python2":
+            case "python3":
+            case "javascript":
+            case "prolog":
+                return "";
+            default:
+                return false; # language not supported
+        }
+    }
+    /**
+      * Return the string used to run the program.
+      
+      */
+    private static function cmdRun($lang,$userTempDir,$runFile,$runtime_args) {
+        // Should detect windows/cygwin/linux
+        $runscript = '';
+        if(strtoupper(substr(PHP_OS, 0, 3)) === "WIN") {
+            // Look for cygwin
+            // Should probably use the registry
+            // will fail if cygwin isn't installed on windows
+            $runscript = "C:\\cygwin\\bin\\timeout.exe 10";
+            $ext = ".exe";
+        } else {
+            // We're running something *nix
+            // we can use ulimit to limit memory use, not sure  about windows
+            // limit to 64MB of virtual memory
+            // 5s of runtime, could possibly change this limit for each test
+            // may want to use ulimit to limit the cpu time
+            
+            // Okay, use a specific user, if it doesn't exist, return an error telling
+            // the user to set it up
+          /*  $retval = 0;
+            exec("id moodle_sandbox",[],$retval);
+            if($retval !== 0) {
+                return ['error'=>"Sandbox user does not exist. Please contact administrator"];
+            }
+            ulimit -v 65536; / */ 
+            $runscript = '/usr/bin/timeout 10'; //'iptables -A OUTPUT -m owner --cmd-owner $runFile -j DROP 
+            $ext = "";
+        }
+        // Check the runscript exists
+        /*
+        if(!file_exists($runscript)) {
+            return ['error'=>"Sandbox utility does not exist. Please contact system administrator"];
+        }
+        */
+        // In future, update to:  return this::prepareCommand($DB->get_record("codehandin_languages",["id"=>$lang])["runCommand"]);
+        switch($lang) {
+            case "java":
+                return  "$runscript java -cp {$userTempDir} {$runFile} {$runtime_args}";  //-Djava.security.policy=./runpolicy.java.policy -Djava.security.manager";
+            case "c":
+            case "c++":
+                return  "$runscript {$userTempDir}{$runFile}{$ext} {$runtime_args}";
+            case "octave":
+                return  "$runscript  octave --no-window-system -q {$runfile} {$runtime_args}";
+            case "matlab":
+                $runfile = explode('.',$runfile)[0];
+                // May want to chomp off the copyright message here
+                return   "$runscript matlab -nodisplay -nojvm -nosplash -r \"{$runfile} {$runtime_args}; exit\"";
+            case "python3":
+                return "$runscript python3 {$runfile} {$runtime_args}";
+            case "python2":
+                return  "$runscript python2.7 {$runfile} {$runtime_args}";
+            case "javascript":
+                return "$runscript rhino {$runfile} {$runtime_args}";
+            case "prolog":
+                return "$runscript swipl {$runfile} {$runtime_args}";
+            default:
+                return false;
+        }
+    }
+    /**
+      * @param $aid the assignment id
+      * @param $file the file object returned by self::getFile
+      * @param $continue continue with more tests when a test fails
+      * @param $assessment if this is for assessment purposes
+      */
+     
+    private static function test($aid ,$file,$continue, $assessment) {
+        global $CFG,$USER,$DB;
+        $context = get_context_instance(CONTEXT_MODULE, $USER->id);
+        self::validate_context($context);
+        // We should check if this student is even in a topic with this codehandin. if they are being assessed, check if they aren't
+        // Submitting again when they shouldn't
+        $userTempDir = $CFG->dataroot . '/temp/' . $USER->id . '/';
+    	// Make sure the user has a dir in the temp dir
+        if(!file_exists($userTempDir)) {
+            mkdir($userTempDir,0777,true);
+        }
+       
+        if(!$file) {
+            return ['type'=>'internal','error'=>"Could not retrieve file. Make sure you own the file"];
+        }
+        $testFile = $userTempDir.$file->get_filename();
+        $file->copy_content_to($testFile);
+        // If the mimetype is a zip file, unzip
+        // Should get the language of the assignment and 
+        // use the appropriate compiler/runtime
+        
+        $lang = $DB->get_record('codehandin',array('id'=>$aid))->language;
+        // If the file is a zip, we should probably unzip it
+        if($file->get_mimetype() === "application/zip") {
+            $zip = new ZipArchive;
+            $res = $zip->open($testFile);
+            if($res === TRUE) {
+                $zip->extractTo($userTempDir);
+                $zip->close();
+                $fromZip = true;
+            } else {
+                return ['error'=>"Could not unzip file {$file->get_filename()}",'type'=>'internal'];
+            }
+        } elseif($file->get_mimetype() === "text/plain") {
+            $fromZip = false;
+        } else {
+            return ['error'=>"Could not determine the filetype"]; // prevent the user from trying to compile non plaintext files
+        }
+        $cmd = self::cmdCompile($lang,$userTempDir);
+        if($cmd === false) {
+            return ['error'=>"Langauge $lang doesn't exist. Please contact the teacher"];
+        }
+        putenv("PATH=/usr/local/bin:/usr/bin:/bin");
+        $retval =0;
+        $output = [];
+        exec($cmd.' 2>&1',$output,$retval);
+
+        //If return value from compiler isn't 0, we stop        
+        if($retval != 0) {
+		// Clean up generated files in the user's dir
+	        cleanup($USER->id);
+            return ['type'=>'compiler',
+                'error'=>"Your code did not compile or the compiler returned a non-zero value",
+                'cmd'=>$cmd,
+                'path'=>getenv('PATH'),
+                'retval'=>$retval,
+                'output'=>implode("\n",$output)
+            ];
+        }
+        $sql ="SELECT {codehandin_test}.id as tid,
+                      {codehandin_checkpoint}.id AS cid, 
+                      {codehandin_test}.input, 
+                      {codehandin_test}.output, 
+                      {codehandin_test}.runtime_args,
+                      {codehandin_test}.stderr,
+                      {codehandin_test}.retval
+                 FROM {codehandin_checkpoint}, 
+                      {codehandin_test}, 
+                      {codehandin}
+                WHERE {codehandin}.id = ?
+                  AND {codehandin_checkpoint}.assign_id = {codehandin}.id 
+                  AND {codehandin_test}.checkpoint_id = {codehandin_checkpoint}.id";
+        // If a teacher tests this it should use all tests, teachers can't submit though
+        if(has_capability('mod/codehandin:addinstance',$context)) {}
+        elseif(!$assessment)  $sql .= " AND {codehandin_test}.assessment = 0";
+        $sql .=  " ORDER BY {codehandin_checkpoint}.ordering ASC, tid, cid";
+        $inputs = $DB->get_records_sql($sql,[$aid]);
+        $results = [];
+
+        foreach($inputs as $k=>$i) {
+            // Use the policy file to prevent running malicious code
+            // perhaps we could have an argument to specify the main class?
+            // This would need to be stored when running an assessment
+            $runClass = $fromZip ? "Main" : explode('.',$file->get_filename())[0];
+            if($lang == "matlab") 
+                $runClass = $file->get_filename();
+            $cmd = self::cmdRun($lang,$userTempDir,$runClass,$i->runtime_args);
+            // Some kind of error occurred when making the run cmd
+            if(is_array($cmd))
+                return $cmd;
+            // Time should be in the db and specified per test
+            $desc = array(
+                0=>array('pipe','r'),
+                1=>array('pipe','w'),
+                2=>array('pipe','r')        
+            );
+            $proc = proc_open($cmd,$desc,$pipes);
+            if(is_resource($proc)) {
+                fwrite($pipes[0],$i->input);
+                fclose($pipes[0]);
+                // This buffer may become large
+                // so we may want to chunk it
+                // and periodically check if it exceeds the expected
+                // output length
+                $output = stream_get_contents($pipes[1]);
+                fclose($pipes[1]);
+                $stderr = stream_get_contents($pipes[2]);
+                fclose($pipes[2]);
+                $retval = proc_close($proc);
+            } else {
+                return ['error'=>"Could not run cmd: {$cmd}"];
+            }
+            // timeout returns 124 on timeout
+            if($retval == "124")
+                return ["type"=>"runtime","error"=>"Time limit exceeded"];
+            // need to ensure that the test data is split with \n
+            $output =           self::prepareOutput($output);
+            $required_output =  self::prepareOutput($i->output);
+            $stderr =           self::prepareOutput($stderr);
+            $required_stderr =  self::prepareOutput($i->stderr);
+            // Might need to organise newlines/trailing whitespace depending on OS
+            $pass = $output == $required_output && $stderr == $required_stderr && $retval == $i->retval;
+            $test_result = ['checkpoint_id'=>$i->cid,'test_id'=>$i->tid,'pass'=>$pass];
+            // When under assessment, the student is not shown the required input/outputs
+            if(!$pass && !$assessment) {
+                $test_result['cmd']             = $cmd;
+                $test_result['input']           = $i->input;
+                $test_result['given_output']    = $output;
+                $test_result['required_output'] = $required_output;
+                $test_result['required_stderr'] = $required_stderr;
+                $test_result['stderr']          = $stderr;
+                $test_result['retval']          = $retval;
+                $test_result['required_retval'] = $i->retval;
+                if(!$continue) {
+                    $results[] = $test_result;
+                    break;
+                }
+            }
+            
+            $results[] = $test_result;
+            // If we fail a test during assessment we don't continue
+            if(!$pass && $assessment)
+                break;
+      
+        }
+
+        cleanup($USER->id);
+        
+        $cps = [];
+        foreach($inputs as $i) {
+            $cps[$i->cid] = 0;
+        }
+        $cp_total = count($cps);
+        // Map of checkpoint_id -> pass
+        $checkpoints = [];
+        foreach($results as $r) {
+            if(!array_key_exists($r['checkpoint_id'],$checkpoints)) {
+                $checkpoints[$r['checkpoint_id']]  = $r['pass'];
+            } else {
+                $checkpoints[$r['checkpoint_id']] &= $r['pass']; 
+            }
+        }
+        $checkpoints_passed = count(array_filter($checkpoints));
+        return ['assessment'=>$assessment,'checkpoints'=>$checkpoints,'test_results'=>$results,'checkpoints_passed'=>$checkpoints_passed,'checkpoints_total'=>$cp_total,'grade'=>$checkpoints_passed/$cp_total*100];
+    }
+    /**
+     * Returns the results of running the tests for a specific assignment
+     * @param $aid the assignment identifier
+     * @param $continue continue when a test fails
+     * @return json of the test results
+     */
+    public static function test_assignment($aid ,$file_id ,$continue) {
+        global $USER, $DB, $CFG;
+        //Parameter validation
+        //REQUIRED
+        $params = self::validate_parameters(self::test_assignment_parameters(),
+                array('aid' => $aid, 'file_id' =>$file_id, 'continue'=>$continue));
+        
+        //Context validation
+        //OPTIONAL but in most web service it should present
+        $context = get_context_instance(CONTEXT_MODULE, $USER->id);
+        self::validate_context($context);
+        
+        if (!has_capability('mod/codehandin:submit', $context) || has_capability('mod/codehandin:addinstance',$context)) {
+            return json_encode(['error'=>"You do not have permissions to test this."]);
+        }
+        $file = self::getFile($file_id);
+        $result = self::test($aid,$file,$continue,false);
+        $file->delete();
+        return json_encode($result);
+    }
+
+    /**
+     * Returns description of method result value
+     * @return external_description
+     */
+    public static function test_assignment_returns() {
+        return new external_value(PARAM_RAW, 'The result of running tests for the assignment');
+    }
+
+    /**
+     * 
+     */
+    public static function submit_assignment_parameters() {
+       return new external_function_parameters(
+                array('aid'      => new external_value(PARAM_INT, 'Assignment identifier'),
+                      'file_id' => new external_value(PARAM_INT, 'ID of the file we want to test'),
+                      'reallysubmit'=>new external_value(PARAM_BOOL, 'Submit the file even when it doesn\'t compile')
+                )
+        );
+    }
+    public static function submit_assignment($aid, $file_id,$reallysubmit) {
+    
+        global $USER, $DB, $CFG;
+        //Parameter validation
+        //REQUIRED
+        $params = self::validate_parameters(self::submit_assignment_parameters(),
+                array('aid' => $aid, 'file_id' =>$file_id,'reallysubmit'=>$reallysubmit));
+        
+        //Context validation
+        //OPTIONAL but in most web service it should present
+        $context = get_context_instance(CONTEXT_MODULE, $USER->id);
+        self::validate_context($context);
+        // Check that this assigmnent hasn't  been submitted by the user before
+        if($DB->record_exists('codehandin_submission',array('userid'=>$USER->id,'aid'=>$aid))) {
+            // Delete the new upload
+            if($f = self::getFile($file_id))
+                $f->delete();
+            return json_encode(['error'=>"You have already submitted this assignment."]);
+        }
+        if (!has_capability('mod/codehandin:submit', $context)) {
+            return json_encode(['error'=>"You do not have permissions to submit a codehandin assignment"]);
+        }
+        $file = self::getFile($file_id);
+        $result = self::test($aid,$file,false,true);
+        $record = new stdClass();
+        $record->aid = $aid;
+        $record->userid = $USER->id;
+        $record->fileid = $file->get_id();
+        $record->timecreated = time();
+        if(array_key_exists("error",$result)) {
+            // There is an error in the running of the code
+            if($reallysubmit) {
+                // Students wants 0 marks
+                $record->auto_grade = 0;
+                $record->compiles = 0;
+                $result = ["error"=>"Your assignment was submitted. You have received a 0 mark for non-compiling code."];
+            } else {
+                // Warn them the error was made and don't submit'
+                $result['error'] .= "\nThere was an error in compiling your code and no submission was made. Set reallysubmit to submit again. You will receive 0 marks for non compiling code.";
+                return json_encode($result);
+            }
+        } else {
+            // The code compiles and we give them their calculated grade
+            $record->auto_grade = $result['grade'];
+        }
+        $codehandin = $DB->get_record("codehandin",['id'=>$aid]);
+        if( $record->timecreated > $codehandin->duedate) {
+            $result['note'] ="You have submitted this after the due date and may receive penalties to your grade";
+        }
+        // Store the result in the database and mark that they have submitted
+        $DB->insert_record('codehandin_submission',$record);
+        return json_encode($result);
+    }
+   /**
+     * Returns description of method result value
+     * @return external_description
+     */
+    public static function submit_assignment_returns() {
+        return new external_value(PARAM_RAW, 'The results of the public and private tests, mapping from testId to result (true|false)');
+    }
+    
+
+    public static function list_files_parameters() {
+        return new external_function_parameters(
+                array()
+        );
+    }
+
+    public static function list_files() {
+        global $USER, $DB;
+
+        //Parameter validation
+        //REQUIRED
+        $params = self::validate_parameters(self::list_files_parameters(),
+                array());
+
+        //Context validation
+        //OPTIONAL but in most web service it should present
+        $context = get_context_instance(CONTEXT_MODULE, $USER->id);
+        self::validate_context($context);
+        $fs = get_file_storage();
+        
+        $files = $fs->get_area_files('22', 'user', 'private', false, "itemid, filepath, filename", true);
+        ob_start();
+        var_dump($files);
+        $result = ob_get_clean();
+        return $result;
+    }
+    
+    /**
+     * Returns the list of files belonging to the user
+     * @return external_description
+     */
+    public static function list_files_returns() {
+        return new external_value(PARAM_RAW, 'A list of files belonging to the current user');
+    }
+    
+    public static function create_checkpoint($aid,$id,$name,$description) {
+        global $USER,$DB;
+       
+        $context = get_context_instance(CONTEXT_MODULE, $USER->id);
+        self::validate_context($context);
+        // Check that this user is even allowed to do this
+        if(!has_capability("mod/codehandin:addinstance",$context)) {
+            return json_encode(['error'=>"You are not authorised to perform this action"]);
+        }
+        $params = self::validate_parameters(self::create_checkpoint_parameters(),
+                array('aid'=>$aid,'id'=>$id,'name'=>$name,'description'=>$description));
+        // Check that this assigmnent hasn't  been submitted by the user before
+        if(!$DB->record_exists('codehandin',array('id'=>$aid))) {
+            return json_encode(['error'=>"There is no codehandin assignment with this id {$aid}"]);
+        }
+        // Check that this assigmnent hasn't  been submitted by the user before
+        if($DB->record_exists('codehandin_checkpoint',array('assign_id'=>$aid,'ordering'=>$id))) {
+            return json_encode(['error'=>"There is already a checkpoint in assignment {$aid} with number {$id}. Use fetch to view them."]);
+        }
+        $record = new stdClass();
+        $record->task = $name;
+        $record->assign_id = $aid;
+        $record->ordering = $id;
+        $record->description = $description;
+        $id = $DB->insert_record("codehandin_checkpoint",$record);
+        return json_encode(["id"=>$id]);
+    }
+    public static function create_checkpoint_parameters() {
+        return new external_function_parameters(array(
+            'aid'=> new external_value(PARAM_INT,"The id of the codehandin assignment this checkpoint is for"),
+            'id'=> new external_value(PARAM_INT,"The id of this checkpoint. Lower numbers typically indicate basic functionality, while higher numbers indicate complex functionality"),
+            'name'=> new external_value(PARAM_TEXT,"The name of the new checkpoint"),
+            'description'=> new external_value(PARAM_TEXT,"The description of the new checkpoint"),
+        ));
+        
+    }
+    public static function create_checkpoint_returns() {
+        return new external_value(PARAM_RAW, "JSON Object containing any errors or the id of the new checkpoint");
+    }
+    
+    /**
+      * Create a test
+      */
+    
+    public static function create_test($cid,$descr,$assessment,$input,$output,$retval,$runtime_args,$stderr) {
+        global $USER,$DB;
+       
+        $context = get_context_instance(CONTEXT_MODULE, $USER->id);
+        self::validate_context($context);
+        // Check that this user is even allowed to do this
+        if(!has_capability("mod/codehandin:addinstance",$context)) {
+            return json_encode(['error'=>"You are not authorised to perform this action"]);
+        }
+        $params = self::validate_parameters(self::create_test_parameters(),
+                array('cid'=>$cid,
+                    'descr'=>$descr,
+                    'assessment'=>$assessment,
+                    'input'=>$input,
+                    'output'=>$output,
+                    'retval'=>$retval,
+                    'runtime_args'=>$runtime_args,
+                    'stderr'=>$stderr
+                )
+            );
+        // Check that this assigmnent hasn't  been submitted by the user before
+        if(!$DB->record_exists('codehandin_checkpoint',array('id'=>$cid))) {
+            return json_encode(['error'=>"There is no codehandin checkpoint with this id {$cid}"]);
+        }
+        $record = new stdClass();
+        $record->descr = $descr;
+        $record->assessment = $assessment;
+        $record->checkpoint_id = $cid;
+        $record->runtime_args = $runtime_args;
+        $record->input = $input;
+        $record->output = $output;
+        $record->retval = $retval;
+        $record->stderr = $stderr;
+        $id = $DB->insert_record("codehandin_test",$record);
+        return json_encode(["id"=>$id]);
+    }
+    public static function create_test_parameters() {
+        return new external_function_parameters(array(
+            'cid'=> new external_value(PARAM_INT,"The name of the new checkpoint"),
+            'descr'=> new external_value(PARAM_TEXT,"The description of the new test"),
+            'assessment'=>new external_value(PARAM_BOOL,"If this test is for assessment purposes only"),
+            'input'=> new external_value(PARAM_TEXT,"The input data"),
+            'output'=> new external_value(PARAM_TEXT,"The output data"),
+            'retval'=> new external_value(PARAM_INT,"The expected return value"),
+            'runtime_args'=> new external_value(PARAM_TEXT,"The runtime arguments for this checkpoint"),
+            'stderr'=> new external_value(PARAM_TEXT,"The expected stderr"),
+        ));
+        
+    }
+    public static function create_test_returns() {
+        return new external_value(PARAM_RAW, "A json object containing any errors or the id of the new checkpoint");
+    }
+
+}

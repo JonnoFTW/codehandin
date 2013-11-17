@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<XMLDB PATH="mod/codehandin/db" VERSION="20131101" COMMENT="XMLDB file for Moodle mod/codehandin"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd"
+>
+  <TABLES>
+    <TABLE NAME="codehandin" COMMENT="Default comment for codehandin, please edit me" NEXT="codehandin_checkpoint">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true" NEXT="course"/>
+        <FIELD NAME="course" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="Course codehandin activity belongs to" PREVIOUS="id" NEXT="name"/>
+        <FIELD NAME="name" TYPE="char" LENGTH="255" NOTNULL="true" SEQUENCE="false" COMMENT="name field for moodle instances" PREVIOUS="course" NEXT="intro"/>
+        <FIELD NAME="intro" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="General introduction of the codehandin activity" PREVIOUS="name" NEXT="introformat"/>
+        <FIELD NAME="introformat" TYPE="int" LENGTH="4" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="Format of the intro field (MOODLE, HTML, MARKDOWN...)" PREVIOUS="intro" NEXT="timecreated"/>
+        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" PREVIOUS="introformat" NEXT="timemodified"/>
+        <FIELD NAME="timemodified" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" SEQUENCE="false" PREVIOUS="timecreated" NEXT="duedate"/>
+        <FIELD NAME="duedate" TYPE="int" LENGTH="10" NOTNULL="false" SEQUENCE="false" COMMENT="Due date for the assignment" PREVIOUS="timemodified" NEXT="language"/>
+        <FIELD NAME="language" TYPE="char" LENGTH="45" NOTNULL="false" DEFAULT="java" SEQUENCE="false" COMMENT="The language that this assignment uses" PREVIOUS="duedate" NEXT="grade"/>
+        <FIELD NAME="grade" TYPE="int" LENGTH="10" NOTNULL="false" DEFAULT="100" SEQUENCE="false" PREVIOUS="language"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+      </KEYS>
+      <INDEXES>
+        <INDEX NAME="course" UNIQUE="false" FIELDS="course"/>
+      </INDEXES>
+    </TABLE>
+    <TABLE NAME="codehandin_checkpoint" COMMENT="A checkpoint in a programming assignments" PREVIOUS="codehandin" NEXT="codehandin_test">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true" NEXT="task"/>
+        <FIELD NAME="task" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="The task to complete as part of this checkpoint" PREVIOUS="id" NEXT="assign_id"/>
+        <FIELD NAME="assign_id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The assignment that this checkpoint is associated with" PREVIOUS="task" NEXT="description"/>
+        <FIELD NAME="description" TYPE="text" NOTNULL="false" SEQUENCE="false" PREVIOUS="assign_id"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id, assign_id"/>
+      </KEYS>
+    </TABLE>
+    <TABLE NAME="codehandin_test" COMMENT="A test as part of a checkpoint. Some should be private" PREVIOUS="codehandin_checkpoint" NEXT="codehandin_submission">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true" NEXT="descr"/>
+        <FIELD NAME="descr" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="A description of this test case" PREVIOUS="id" NEXT="assessment"/>
+        <FIELD NAME="assessment" TYPE="int" LENGTH="1" NOTNULL="false" DEFAULT="0" SEQUENCE="false" COMMENT="Is this test for assessment purposes? ie, the students can't see the input or output." PREVIOUS="descr" NEXT="checkpoint_id"/>
+        <FIELD NAME="checkpoint_id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The checkpoint this test is associated with" PREVIOUS="assessment" NEXT="input"/>
+        <FIELD NAME="input" TYPE="text" NOTNULL="true" SEQUENCE="false" PREVIOUS="checkpoint_id" NEXT="output"/>
+        <FIELD NAME="output" TYPE="text" NOTNULL="true" SEQUENCE="false" PREVIOUS="input" NEXT="runtime_args"/>
+        <FIELD NAME="runtime_args" TYPE="text" NOTNULL="false" SEQUENCE="false" PREVIOUS="output"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id, checkpoint_id"/>
+      </KEYS>
+    </TABLE>
+    <TABLE NAME="codehandin_submission" COMMENT="Codehandin submissions and grades" PREVIOUS="codehandin_test" NEXT="codehandin_runtime">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true" NEXT="userid"/>
+        <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" PREVIOUS="id" NEXT="teacher_grade"/>
+        <FIELD NAME="teacher_grade" TYPE="int" LENGTH="3" NOTNULL="false" SEQUENCE="false" PREVIOUS="userid" NEXT="fileid"/>
+        <FIELD NAME="fileid" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" COMMENT="The id of the file used for the submission" PREVIOUS="teacher_grade" NEXT="auto_grade"/>
+        <FIELD NAME="auto_grade" TYPE="int" LENGTH="3" NOTNULL="true" SEQUENCE="false" PREVIOUS="fileid" NEXT="timecreated"/>
+        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="false" PREVIOUS="auto_grade" NEXT="teacher_comment"/>
+        <FIELD NAME="teacher_comment" TYPE="text" NOTNULL="false" SEQUENCE="false" COMMENT="Teacher comments" PREVIOUS="timecreated" NEXT="compiles"/>
+        <FIELD NAME="compiles" TYPE="int" LENGTH="1" NOTNULL="false" DEFAULT="1" SEQUENCE="false" PREVIOUS="teacher_comment"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+      </KEYS>
+    </TABLE>
+    <TABLE NAME="codehandin_runtime" COMMENT="Stores the runtimes for languages" PREVIOUS="codehandin_submission">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true" NEXT="shortname"/>
+        <FIELD NAME="shortname" TYPE="char" LENGTH="20" NOTNULL="true" SEQUENCE="false" PREVIOUS="id" NEXT="run_command"/>
+        <FIELD NAME="run_command" TYPE="char" LENGTH="200" NOTNULL="false" SEQUENCE="false" COMMENT="The actual command to be run. $file will insert the user's file name into the string." PREVIOUS="shortname" NEXT="compile_command"/>
+        <FIELD NAME="compile_command" TYPE="char" LENGTH="200" NOTNULL="false" SEQUENCE="false" COMMENT="The command to compile the users files." PREVIOUS="run_command" NEXT="remove_extension"/>
+        <FIELD NAME="remove_extension" TYPE="int" LENGTH="1" NOTNULL="false" SEQUENCE="false" COMMENT="Remove the file extension when placing the user's file in the run command." PREVIOUS="compile_command"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+      </KEYS>
+    </TABLE>
+  </TABLES>
+</XMLDB>
